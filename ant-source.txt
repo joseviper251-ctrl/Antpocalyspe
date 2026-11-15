@@ -1,0 +1,546 @@
+--[[
+    Combined client-side script
+    - Hitbox expander (built-in team checker, hides same-team players)
+    - Infinite ammo (run-ID version, self-cleans on re-run)
+    - Fire rate boost
+    - No spread
+    Rayfield UI. All features toggleable.
+    Made by The Secret Lair
+]]
+
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Teams = game:GetService("Teams")
+
+local localPlayer = Players.LocalPlayer
+
+----------------------------------------------------------------------
+-- STATE
+----------------------------------------------------------------------
+local hitboxEnabled = false
+local hitboxTargetSize = 5
+local infAmmoEnabled = false
+local fireRateEnabled = false
+local noSpreadEnabled = false
+
+local FIRE_RATE_BOOST = 10000
+
+----------------------------------------------------------------------
+-- BUILT-IN TEAM CHECKER
+----------------------------------------------------------------------
+local teamChecker = {}
+
+local function teamsByColor()
+    local map = {}
+    for _, team in ipairs(Teams:GetTeams()) do
+        map[team.TeamColor] = team
+    end
+    return map
+end
+
+function teamChecker.getMyTeam()
+    if localPlayer.Team then
+        return localPlayer.Team
+    end
+    local byColor = teamsByColor()
+    if localPlayer.TeamColor and byColor[localPlayer.TeamColor] then
+        return byColor[localPlayer.TeamColor]
+    end
+    return nil
+end
+
+local function getCharacterTeam(model)
+    local plr = Players:GetPlayerFromCharacter(model)
+    if not plr then
+        return nil, nil
+    end
+    if plr.Team then
+        return plr.Team, plr
+    end
+    local byColor = teamsByColor()
+    if plr.TeamColor and byColor[plr.TeamColor] then
+        return byColor[plr.TeamColor], plr
+    end
+    return nil, plr
+end
+
+function teamChecker.isTeammate(model)
+    local myTeam = teamChecker.getMyTeam()
+    if not myTeam then
+        return false
+    end
+
+    local theirTeam, theirPlayer = getCharacterTeam(model)
+    if not theirPlayer then
+        return false
+    end
+
+    if theirTeam and theirTeam == myTeam then
+        return true
+    end
+
+    if localPlayer.TeamColor and theirPlayer.TeamColor
+        and localPlayer.TeamColor == theirPlayer.TeamColor then
+        return true
+    end
+
+    return false
+end
+
+local function isTargetCharacter(model)
+    if model == localPlayer.Character then
+        return false
+    end
+    local humanoid = model:FindFirstChildOfClass("Humanoid")
+    if not humanoid or humanoid.Health <= 0 then
+        return false
+    end
+    if teamChecker.isTeammate(model) then
+        return false
+    end
+    return true
+end
+
+----------------------------------------------------------------------
+-- HITBOX EXPANDER
+----------------------------------------------------------------------
+local originals = {}
+local rootCleanup = {}
+
+local function expandRoot(root)
+    if not originals[root] then
+        originals[root] = {
+            Size = root.Size,
+            Transparency = root.Transparency,
+            CanCollide = root.CanCollide,
+        }
+    end
+    root.Size = Vector3.new(hitboxTargetSize, hitboxTargetSize, hitboxTargetSize)
+    root.Transparency = 0.7
+    root.CanCollide = false
+end
+
+local function restoreRoot(root)
+    local saved = originals[root]
+    if saved and root.Parent then
+        root.Size = saved.Size
+        root.Transparency = saved.Transparency
+        root.CanCollide = saved.CanCollide
+    end
+    originals[root] = nil
+    if rootCleanup[root] then
+        rootCleanup[root]:Disconnect()
+        rootCleanup[root] = nil
+    end
+end
+
+local function restoreAll()
+    for root in pairs(originals) do
+        restoreRoot(root)
+    end
+    table.clear(originals)
+end
+
+local function reevaluate(model, root)
+    if not hitboxEnabled then
+        return
+    end
+    if originals[root] then
+        restoreRoot(root)
+    end
+    if isTargetCharacter(model) and root.Parent then
+        expandRoot(root)
+    end
+end
+
+local function watchCharacter(model)
+    local humanoid = model:FindFirstChildOfClass("Humanoid")
+    local root = model:FindFirstChild("HumanoidRootPart")
+    if not humanoid or not root or not root:IsA("BasePart") then
+        return
+    end
+    if rootCleanup[root] then
+        return
+    end
+
+    local conns = {}
+
+    conns[#conns + 1] = humanoid.Died:Connect(function()
+        if originals[root] then
+            restoreRoot(root)
+        end
+    end)
+
+    local plr = Players:GetPlayerFromCharacter(model)
+    if plr then
+        conns[#conns + 1] = plr:GetPropertyChangedSignal("Team"):Connect(function()
+            reevaluate(model, root)
+        end)
+        conns[#conns + 1] = plr:GetPropertyChangedSignal("TeamColor"):Connect(function()
+            reevaluate(model, root)
+        end)
+    end
+
+    conns[#conns + 1] = model.AncestryChanged:Connect(function(_, parent)
+        if parent == nil then
+            if originals[root] then
+                restoreRoot(root)
+            end
+            for _, c in ipairs(conns) do
+                if c.Connected then c:Disconnect() end
+            end
+        end
+    end)
+
+    rootCleanup[root] = {
+        Disconnect = function()
+            for _, c in ipairs(conns) do
+                if c.Connected then c:Disconnect() end
+            end
+        end,
+    }
+end
+
+local function applyAll()
+    if not hitboxEnabled then
+        return
+    end
+    for _, inst in ipairs(Workspace:GetDescendants()) do
+        if inst:IsA("Humanoid") and inst.Parent and inst.Parent:IsA("Model") then
+            local model = inst.Parent
+            local root = model:FindFirstChild("HumanoidRootPart")
+            if root and root:IsA("BasePart") then
+                watchCharacter(model)
+                if isTargetCharacter(model) then
+                    expandRoot(root)
+                elseif originals[root] then
+                    restoreRoot(root)
+                end
+            end
+        end
+    end
+end
+
+Workspace.DescendantAdded:Connect(function(inst)
+    if not hitboxEnabled then
+        return
+    end
+    if inst:IsA("Humanoid") and inst.Parent and inst.Parent:IsA("Model") then
+        local model = inst.Parent
+        task.defer(function()
+            if hitboxEnabled and isTargetCharacter(model) then
+                local root = model:FindFirstChild("HumanoidRootPart")
+                if root and root:IsA("BasePart") then
+                    watchCharacter(model)
+                    expandRoot(root)
+                end
+            end
+        end)
+    end
+end)
+
+localPlayer:GetPropertyChangedSignal("Team"):Connect(function()
+    if hitboxEnabled then
+        applyAll()
+    end
+end)
+localPlayer:GetPropertyChangedSignal("TeamColor"):Connect(function()
+    if hitboxEnabled then
+        applyAll()
+    end
+end)
+
+----------------------------------------------------------------------
+-- INFINITE AMMO (run-ID version, self-cleans on re-run)
+----------------------------------------------------------------------
+local RUN_ATTR = "InfiniteAmmoRun"
+local runId = (localPlayer:GetAttribute(RUN_ATTR) or 0) + 1
+localPlayer:SetAttribute(RUN_ATTR, runId)
+
+local ammoAlive = true
+local ammoConnections = {}
+local toolLinks = {}
+
+local function isRunCurrent()
+    return ammoAlive and localPlayer:GetAttribute(RUN_ATTR) == runId
+end
+
+local function refill(tool)
+    if not infAmmoEnabled then
+        return
+    end
+    local maxAmmo = tool:GetAttribute("MaxAmmo")
+    if maxAmmo and tool:GetAttribute("CurrentAmmo") ~= maxAmmo then
+        tool:SetAttribute("CurrentAmmo", maxAmmo)
+    end
+end
+
+local function watchTool(tool)
+    if not tool:IsA("Tool") or toolLinks[tool] then
+        return
+    end
+    if tool:GetAttribute("MaxAmmo") == nil then
+        return
+    end
+    local conn = tool:GetAttributeChangedSignal("CurrentAmmo"):Connect(function()
+        if isRunCurrent() then
+            refill(tool)
+        end
+    end)
+    toolLinks[tool] = conn
+    refill(tool)
+end
+
+local function unwatchTool(tool)
+    local conn = toolLinks[tool]
+    if conn then
+        conn:Disconnect()
+        toolLinks[tool] = nil
+    end
+end
+
+local function watchContainer(container)
+    if not container then
+        return
+    end
+    for _, child in ipairs(container:GetChildren()) do
+        watchTool(child)
+    end
+    table.insert(ammoConnections, container.ChildAdded:Connect(function(child)
+        if isRunCurrent() then
+            watchTool(child)
+        end
+    end))
+    table.insert(ammoConnections, container.ChildRemoved:Connect(unwatchTool))
+end
+
+local function onAmmoCharacterAdded(character)
+    if not isRunCurrent() then
+        return
+    end
+    watchContainer(character)
+    local backpack = localPlayer:WaitForChild("Backpack", 10)
+    if backpack and isRunCurrent() then
+        watchContainer(backpack)
+    end
+end
+
+table.insert(ammoConnections, localPlayer.CharacterAdded:Connect(onAmmoCharacterAdded))
+if localPlayer.Character then
+    onAmmoCharacterAdded(localPlayer.Character)
+end
+
+table.insert(ammoConnections, localPlayer:GetAttributeChangedSignal(RUN_ATTR):Connect(function()
+    if localPlayer:GetAttribute(RUN_ATTR) ~= runId then
+        ammoAlive = false
+        for _, c in ipairs(ammoConnections) do
+            c:Disconnect()
+        end
+        for _, c in pairs(toolLinks) do
+            c:Disconnect()
+        end
+        table.clear(toolLinks)
+    end
+end))
+
+----------------------------------------------------------------------
+-- FIRE RATE BOOST
+----------------------------------------------------------------------
+local function applyBoost(character)
+    if not character or not fireRateEnabled then
+        return
+    end
+    character:SetAttribute("FireRateBoost", FIRE_RATE_BOOST)
+end
+
+local function onCharacterAdded(character)
+    applyBoost(character)
+    character:GetAttributeChangedSignal("FireRateBoost"):Connect(function()
+        if fireRateEnabled and character:GetAttribute("FireRateBoost") ~= FIRE_RATE_BOOST then
+            character:SetAttribute("FireRateBoost", FIRE_RATE_BOOST)
+        end
+    end)
+end
+
+if localPlayer.Character then
+    onCharacterAdded(localPlayer.Character)
+end
+localPlayer.CharacterAdded:Connect(onCharacterAdded)
+
+----------------------------------------------------------------------
+-- NO SPREAD
+----------------------------------------------------------------------
+local Functions = require(
+    ReplicatedStorage:WaitForChild("Packages"):WaitForChild("Visual")
+        :WaitForChild("DynamicCrosshair"):WaitForChild("Functions")
+)
+local originalRandomPoints = Functions.RandomPointsInsideCrosshair
+
+local function setNoSpread(value)
+    if value then
+        Functions.RandomPointsInsideCrosshair = function()
+            return 0, 0
+        end
+    else
+        Functions.RandomPointsInsideCrosshair = originalRandomPoints
+    end
+end
+
+----------------------------------------------------------------------
+-- UI
+----------------------------------------------------------------------
+local Window = Rayfield:CreateWindow({
+    Name = "Antpocalypse",
+    LoadingTitle = "Loading...",
+    LoadingSubtitle = "by The Secret Lair",
+    ConfigurationSaving = {
+        Enabled = true,
+        FolderName = "Antpocalypse",
+        FileName = "config",
+    },
+    Keybind = "RightShift",
+})
+
+local MainTab = Window:CreateTab("Main", 4483362458)
+
+MainTab:CreateSection("Hitbox")
+
+MainTab:CreateToggle({
+    Name = "Enable Hitbox Expander",
+    CurrentValue = false,
+    Flag = "hitboxEnabled",
+    Callback = function(value)
+        hitboxEnabled = value
+        if value then
+            applyAll()
+        else
+            restoreAll()
+        end
+    end,
+})
+
+MainTab:CreateSlider({
+    Name = "Hitbox Size",
+    Range = {2, 30},
+    Increment = 1,
+    Suffix = " studs",
+    CurrentValue = 5,
+    Flag = "hitboxSize",
+    Callback = function(value)
+        hitboxTargetSize = value
+        if hitboxEnabled then
+            applyAll()
+        end
+    end,
+})
+
+MainTab:CreateSection("Guns")
+
+MainTab:CreateToggle({
+    Name = "Infinite Ammo",
+    CurrentValue = false,
+    Flag = "infAmmoEnabled",
+    Callback = function(value)
+        infAmmoEnabled = value
+        if value then
+            local backpack = localPlayer:FindFirstChild("Backpack")
+            if backpack then
+                for _, child in ipairs(backpack:GetChildren()) do
+                    refill(child)
+                end
+            end
+            if localPlayer.Character then
+                for _, child in ipairs(localPlayer.Character:GetChildren()) do
+                    refill(child)
+                end
+            end
+        end
+    end,
+})
+
+MainTab:CreateToggle({
+    Name = "Fire Rate Boost",
+    CurrentValue = false,
+    Flag = "fireRateEnabled",
+    Callback = function(value)
+        fireRateEnabled = value
+        if value and localPlayer.Character then
+            applyBoost(localPlayer.Character)
+        end
+    end,
+})
+
+MainTab:CreateToggle({
+    Name = "No Spread",
+    CurrentValue = false,
+    Flag = "noSpreadEnabled",
+    Callback = function(value)
+        noSpreadEnabled = value
+        setNoSpread(value)
+    end,
+})
+
+----------------------------------------------------------------------
+-- CREDITS TAB
+----------------------------------------------------------------------
+local DISCORD_INVITE = "https://discord.gg/VfychVfg2t"
+
+local CreditsTab = Window:CreateTab("Credits", 4483362458)
+
+CreditsTab:CreateSection("About")
+
+CreditsTab:CreateParagraph({
+    Title = "Antpocalypse",
+    Content = "Made by The Secret Lair. Hitbox expander, infinite ammo, fire rate boost and no spread, all in one.",
+})
+
+CreditsTab:CreateSection("Join Us")
+
+CreditsTab:CreateButton({
+    Name = "Copy Discord Invite",
+    Callback = function()
+        if setclipboard then
+            setclipboard(DISCORD_INVITE)
+            Rayfield:Notify({
+                Title = "Copied!",
+                Content = "Discord invite copied to clipboard.",
+                Duration = 3,
+            })
+        else
+            Rayfield:Notify({
+                Title = "Copy failed",
+                Content = "setclipboard is not available in this executor.",
+                Duration = 3,
+            })
+        end
+    end,
+})
+
+CreditsTab:CreateParagraph({
+    Title = "Discord",
+    Content = DISCORD_INVITE,
+})
+
+----------------------------------------------------------------------
+-- PERIODIC RE-APPLY
+----------------------------------------------------------------------
+local elapsed = 0
+RunService.Heartbeat:Connect(function(dt)
+    elapsed += dt
+    if elapsed < 0.5 then
+        return
+    end
+    elapsed = 0
+    if hitboxEnabled then
+        applyAll()
+    end
+end)
+
+game:BindToClose(function()
+    hitboxEnabled = false
+    restoreAll()
+end)
